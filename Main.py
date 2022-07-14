@@ -4,6 +4,10 @@ import sys
 import random
 import time
 import os
+import numpy as np
+import re
+
+from pathlib import Path
 
 from PyQt5.QtCore import Qt, QEvent, QAbstractTableModel, QRect, QPoint, QObject, QThread, pyqtSignal, QSize
 from PyQt5.QtGui import *
@@ -11,6 +15,7 @@ from PyQt5.QtWidgets import *
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
+from mpl_toolkits.mplot3d import axes3d
 
 class MainWindow(QWidget):
     '''Main window of the PolyGen application'''
@@ -18,6 +23,28 @@ class MainWindow(QWidget):
         super(MainWindow, self).__init__(parent)
 
         self.path = os.path.abspath(__file__)[:-7]
+
+        self.atom_colors = {'c' : 'black', 
+                            'h' : 'gray', 
+                            'o' : 'red', 
+                            'n' : 'blue',
+                            'x' : 'white'
+                            }
+
+        self.atom_size = {'c' : 0.732,
+                          'h' : 0.315,
+                          'o' : 0.662,
+                          'n' : 0.711,
+                          'x' : 0.001
+                          }
+
+        self.bond_distance = 1.10
+
+        self.new_molecule_dict = {'atoms' : ['x'], 
+                                  'coords' : np.zeros((1,3))
+                                  }
+
+        self.bonds = []
 
         self.initUI()
 
@@ -34,7 +61,7 @@ class MainWindow(QWidget):
 
         self.diacid_list = []
 
-        for fle in sorted(os.listdir(self.path + 'XYZ/Diacids/')):
+        for fle in sorted(os.listdir(Path(self.path + 'XYZ/Diacids/'))):
             if fle.endswith(".xyz"):
                 self.diacid_list.append(fle[:-4].replace('_', ' '))
 
@@ -53,7 +80,7 @@ class MainWindow(QWidget):
 
         self.diol_list = []
 
-        for fle in sorted(os.listdir(self.path + 'XYZ/Diols/')):
+        for fle in sorted(os.listdir(Path(self.path + 'XYZ/Diols/'))):
             if fle.endswith(".xyz"):
                 self.diol_list.append(fle[:-4].replace('_', ' '))
 
@@ -73,7 +100,7 @@ class MainWindow(QWidget):
 
         self.amino_list = []
 
-        for fle in sorted(os.listdir(self.path + 'XYZ/AminoAcids/')):
+        for fle in sorted(os.listdir(Path(self.path + 'XYZ/AminoAcids/'))):
             if fle.endswith(".xyz"):
                 self.amino_list.append(fle[:-4].replace('_', ' '))
 
@@ -124,8 +151,38 @@ class MainWindow(QWidget):
 
         '''Plot'''
 
-        #self.poly_plot = PlotCurve(self)
-        #self.poly_plot_tb = NavigationToolbar2QT(self.poly_plot, self)
+        self.fig = Figure()
+        self.canvas = FigureCanvasQTAgg(self.fig)
+
+        self.ax = self.canvas.figure.add_subplot(projection="3d")
+
+        for axis in [self.ax.xaxis, self.ax.yaxis, self.ax.zaxis]:
+            axis.set_ticklabels([])
+            axis.set_pane_color((1.0, 1.0, 1.0, 0.0))
+            axis._axinfo["grid"]['color'] = (1,1,1,0)
+            
+        self.ax.axis('off')
+
+        self.canvas.draw()
+
+        '''Render Distance'''
+
+        self.render_val = 20
+
+        self.render_lab = QLabel("Render Distance")
+        self.render_lab.setFixedWidth(100)
+
+        self.render_lab2 = QLabel(str(self.render_val))
+
+        self.render_slider = QSlider(Qt.Horizontal)
+        self.render_slider.setRange(0, self.render_val)
+        self.render_slider.setSingleStep(1)
+        self.render_slider.valueChanged.connect(self.Change_Render_Distance)
+        self.render_slider.valueChanged.connect(self.render_lab2.setNum)
+        self.render_slider.valueChanged.connect(self.Update_Plot)
+        self.render_slider.setFixedWidth(250)
+        self.render_slider.setValue(self.render_val)
+
 
         '''Grid Layout'''
 
@@ -163,16 +220,26 @@ class MainWindow(QWidget):
         self.grid_layout.addWidget(QLabel(" -"*dash_count), row, 0, 1, 3, alignment=Qt.AlignCenter)
 
         row+=1
-        #self.grid_layout.addWidget(self.poly_plot, row, 0, 3, 3)
+        self.grid_layout.addWidget(self.render_lab, row, 0, 1, 1, alignment=Qt.AlignCenter)
+        self.grid_layout.addWidget(self.render_slider, row, 1, 1, 1, alignment=Qt.AlignCenter)
+        self.grid_layout.addWidget(self.render_lab2, row, 2, 1, 1, alignment=Qt.AlignCenter)
+
+        row+=1
+        self.grid_layout.addWidget(self.canvas, row, 0, 3, 3)
         
-        row+=3
-        #self.grid_layout.addWidget(self.poly_plot_tb, row, 0, 1, 3, alignment=Qt.AlignCenter)
-
-        return
-
+        
 
     def Add_Diacid_Chain(self):
-        self
+        self.new_molecule_path = Path(self.path + "XYZ/Diacids/" + self.diacid_box.currentText().replace(" ", "_") + ".xyz")
+
+        self.new_molecule_dict  = self.Add_File_To_Dict()
+        self.new_molecule_bonds = self.Get_Bonds()
+
+        #TODO
+            # Add Molecules to chain
+            # Add list of molecules already added
+
+        self.Update_Plot()
 
     def Add_Diol_Chain(self):
         self
@@ -184,9 +251,108 @@ class MainWindow(QWidget):
         self.phi_val = self.phi_slider.value()
         self.theta_val = self.theta_slider.value()
 
+    def Change_Render_Distance(self):
+        self.render_val = self.render_slider.value()
+
     def Update_Plot(self):
-        self
-    
+        self.ax.cla()
+        
+        for j in range(self.new_molecule_dict['coords'].shape[0]):
+            atom   = self.new_molecule_dict['atoms'][j].lower()
+            coords = self.new_molecule_dict['coords'][j]
+            color = self.atom_colors[atom]
+            size = self.atom_size[atom]
+
+            if np.sqrt(np.sum(coords**2)) < self.render_val:
+                self.ax.scatter(*coords, color=color, s=size*500)
+
+        for j in range(len(self.bonds)):
+            x1 = self.bonds[j][0][0]
+            x2 = self.bonds[j][1][0]
+
+            y1 = self.bonds[j][0][1]
+            y2 = self.bonds[j][1][1]
+
+            z1 = self.bonds[j][0][2]
+            z2 = self.bonds[j][1][2]
+
+            x = np.asarray((x1, x2))
+            y = np.asarray((y1, y2))
+            z = np.asarray((z1, z2))
+
+            p1 = np.sqrt(x1**2 + y1**2 + z1**2)
+            p2 = np.sqrt(x2**2 + y2**2 + z2**2)
+
+            if p1 < self.render_val and p2 < self.render_val:
+                self.ax.plot(x, y, z, c='black')
+
+        for axis in [self.ax.xaxis, self.ax.yaxis, self.ax.zaxis]:
+            axis.set_ticklabels([])
+            axis.set_pane_color((1.0, 1.0, 1.0, 0.0))
+            axis._axinfo["grid"]['color'] = (1,1,1,0)
+
+        self.ax.axis('off')
+
+        self.canvas.draw()
+
+
+    def Add_File_To_Dict(self):
+        file_dict = {}
+
+        with open(self.new_molecule_path, 'r') as f:
+            ff = f.readlines()
+
+        num_atoms = int(ff[0])
+
+        ff = ff[2:]
+
+        atoms = []
+        coords = np.zeros((num_atoms, 3))
+
+        atom = 0
+
+        while ff[-1] == '\n':
+            ff = ff[:-1]
+
+        for line in ff:
+            line = re.sub(' +', ' ', line)
+            line = line.split(" ")
+            coord = 0
+            for place in line:
+                if place == '':
+                    pass
+                else:
+                    try:
+                        coords[atom, coord] = float(place)
+                        coord += 1
+                    except:
+                        atoms.append(place)
+
+            atom += 1
+
+        file_dict['atoms'] = atoms
+        file_dict['coords'] = coords
+
+        return file_dict
+
+    def Get_Bonds(self):
+
+        self.bonds = []
+        
+        for j in range(self.new_molecule_dict['coords'].shape[0]):
+            atom1   = self.new_molecule_dict['atoms'][j].lower()
+            coords1 = self.new_molecule_dict['coords'][j]
+
+            for i in range(j+1, self.new_molecule_dict['coords'].shape[0]):
+                atom2   = self.new_molecule_dict['atoms'][i].lower()
+                coords2 = self.new_molecule_dict['coords'][i]
+
+                distance = np.sqrt(np.sum((coords1 - coords2)**2))
+
+                if distance < (self.atom_size[atom1] + self.atom_size[atom2]) * self.bond_distance:
+                    self.bonds.append([coords1, coords2])
+
+
     def exit_program(selaf):
         '''Function used to exit the program and close all windows'''
         exit()
